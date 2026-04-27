@@ -243,10 +243,7 @@ def build_shared_params(tab_prefix: str):
 # ---------------------------------------------------------------------------
 
 def build_app():
-    with gr.Blocks(
-        title="LTX-Video",
-        theme=gr.themes.Soft(primary_hue="violet", neutral_hue="slate"),
-    ) as demo:
+    with gr.Blocks(title="LTX-Video") as demo:
 
         gr.Markdown(
             """
@@ -362,7 +359,7 @@ if __name__ == "__main__":
     app = build_app()
     app.launch(
         server_name="0.0.0.0",
-        server_port=7860,
         inbrowser=True,
         share=False,
+        theme=gr.themes.Soft(primary_hue="violet", neutral_hue="slate"),
     )
