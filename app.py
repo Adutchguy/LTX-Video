@@ -4,7 +4,6 @@ Run with: python app.py
 Then open http://localhost:7860 in your browser.
 """
 
-import os
 import sys
 import gradio as gr
 from pathlib import Path
@@ -53,17 +52,8 @@ def get_output_dir() -> Path:
 
 
 def latest_mp4(directory: Path):
-    files = sorted(directory.glob("*.mp4"), key=os.path.getmtime, reverse=True)
-    return str(files[0]) if files else None
-
-
-def apply_resolution_preset(preset_name, current_width, current_height):
-    """Return (width, height) based on preset selection."""
-    entry = RESOLUTION_PRESETS.get(preset_name)
-    if entry is None:
-        return current_width, current_height
-    w, h = entry
-    return w, h
+    files = list(directory.glob("*.mp4"))
+    return str(max(files, key=lambda p: p.stat().st_mtime)) if files else None
 
 
 # ---------------------------------------------------------------------------

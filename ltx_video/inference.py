@@ -40,6 +40,34 @@ import ltx_video.pipelines.crf_compressor as crf_compressor
 
 logger = logging.get_logger("LTX-Video")
 
+# ---------------------------------------------------------------------------
+# Pipeline cache — keeps the loaded pipeline in memory between inference calls
+# so the multi-GB model weights are not reloaded from disk every generation.
+# ---------------------------------------------------------------------------
+_pipeline_cache: dict = {}  # maps cache_key tuple -> LTXVideoPipeline
+
+
+def _pipeline_cache_key(
+    ckpt_path: str,
+    precision: str,
+    text_encoder_model_name_or_path: str,
+    sampler: Optional[str],
+    device: str,
+    enhance_prompt: bool,
+    prompt_enhancer_image_caption_model_name_or_path: Optional[str],
+    prompt_enhancer_llm_model_name_or_path: Optional[str],
+) -> tuple:
+    return (
+        str(ckpt_path),
+        precision,
+        str(text_encoder_model_name_or_path),
+        sampler,
+        str(device),
+        enhance_prompt,
+        str(prompt_enhancer_image_caption_model_name_or_path),
+        str(prompt_enhancer_llm_model_name_or_path),
+    )
+
 
 def get_total_gpu_memory():
     if torch.cuda.is_available():
@@ -139,12 +167,13 @@ def convert_prompt_to_filename(text: str, max_len: int = 20) -> str:
     current_length = 0
 
     for word in words:
-        # Add word length plus 1 for underscore (except for first word)
-        new_length = current_length + len(word)
+        # Add word length plus 1 for the "-" separator (except before the first word)
+        sep_cost = 1 if result else 0
+        new_length = current_length + sep_cost + len(word)
 
         if new_length <= max_len:
             result.append(word)
-            current_length += len(word)
+            current_length = new_length
         else:
             break
 
@@ -214,6 +243,29 @@ def create_ltx_video_pipeline(
     prompt_enhancer_image_caption_model_name_or_path: Optional[str] = None,
     prompt_enhancer_llm_model_name_or_path: Optional[str] = None,
 ) -> LTXVideoPipeline:
+    # Return cached pipeline when the config hasn't changed, avoiding expensive
+    # multi-GB model reloads between consecutive generation calls.
+    key = _pipeline_cache_key(
+        ckpt_path,
+        precision,
+        text_encoder_model_name_or_path,
+        sampler,
+        device,
+        enhance_prompt,
+        prompt_enhancer_image_caption_model_name_or_path,
+        prompt_enhancer_llm_model_name_or_path,
+    )
+    if key in _pipeline_cache:
+        logger.info("Reusing cached pipeline.")
+        return _pipeline_cache[key]
+
+    # Config changed — free the previous pipeline to reclaim VRAM before loading.
+    if _pipeline_cache:
+        logger.info("Pipeline config changed; clearing cached pipeline to free memory.")
+        _pipeline_cache.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     ckpt_path = Path(ckpt_path)
     assert os.path.exists(
         ckpt_path
@@ -288,6 +340,7 @@ def create_ltx_video_pipeline(
 
     pipeline = LTXVideoPipeline(**submodel_dict)
     pipeline = pipeline.to(device)
+    _pipeline_cache[key] = pipeline
     return pipeline
 
 
@@ -687,14 +740,20 @@ def prepare_conditioning(
     return conditioning_items
 
 
+_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
+
+
+def _is_video_path(path: str) -> bool:
+    return Path(path).suffix.lower() in _VIDEO_EXTENSIONS
+
+
 def get_media_num_frames(media_path: str) -> int:
-    is_video = any(
-        media_path.lower().endswith(ext) for ext in [".mp4", ".avi", ".mov", ".mkv"]
-    )
-    num_frames = 1
-    if is_video:
-        reader = imageio.get_reader(media_path)
+    if not _is_video_path(media_path):
+        return 1
+    reader = imageio.get_reader(media_path)
+    try:
         num_frames = reader.count_frames()
+    finally:
         reader.close()
     return num_frames
 
@@ -707,23 +766,22 @@ def load_media_file(
     padding: tuple[int, int, int, int],
     just_crop: bool = False,
 ) -> torch.Tensor:
-    is_video = any(
-        media_path.lower().endswith(ext) for ext in [".mp4", ".avi", ".mov", ".mkv"]
-    )
-    if is_video:
+    if _is_video_path(media_path):
         reader = imageio.get_reader(media_path)
-        num_input_frames = min(reader.count_frames(), max_frames)
-
-        # Read and preprocess the relevant frames from the video file.
-        frames = []
-        for i in range(num_input_frames):
-            frame = Image.fromarray(reader.get_data(i))
-            frame_tensor = load_image_to_tensor_with_resize_and_crop(
-                frame, height, width, just_crop=just_crop
-            )
-            frame_tensor = torch.nn.functional.pad(frame_tensor, padding)
-            frames.append(frame_tensor)
-        reader.close()
+        try:
+            # Use sequential iteration (much faster than random-access get_data(i))
+            frames = []
+            for i, raw_frame in enumerate(reader):
+                if i >= max_frames:
+                    break
+                frame = Image.fromarray(raw_frame)
+                frame_tensor = load_image_to_tensor_with_resize_and_crop(
+                    frame, height, width, just_crop=just_crop
+                )
+                frame_tensor = torch.nn.functional.pad(frame_tensor, padding)
+                frames.append(frame_tensor)
+        finally:
+            reader.close()
 
         # Stack frames along the temporal dimension
         media_tensor = torch.cat(frames, dim=2)

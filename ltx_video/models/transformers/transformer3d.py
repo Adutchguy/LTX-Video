@@ -202,6 +202,15 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         return fractional_positions
 
     def precompute_freqs_cis(self, indices_grid, spacing="exp"):
+        # During inference the indices_grid is identical across all denoising
+        # timesteps (same resolution / frame count / batch size).  Cache the
+        # result and return it immediately on subsequent calls to avoid
+        # recomputing the same sin/cos tensors dozens of times per generation.
+        cache_key = (indices_grid.shape, indices_grid.dtype, str(indices_grid.device))
+        cached = getattr(self, "_freqs_cis_cache", None)
+        if cached is not None and self._freqs_cis_cache_key == cache_key:
+            return cached
+
         dtype = torch.float32  # We need full precision in the freqs_cis computation.
         dim = self.inner_dim
         theta = self.positional_embedding_theta
@@ -254,7 +263,10 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
             sin_padding = torch.zeros_like(cos_freq[:, :, : dim % 6])
             cos_freq = torch.cat([cos_padding, cos_freq], dim=-1)
             sin_freq = torch.cat([sin_padding, sin_freq], dim=-1)
-        return cos_freq.to(self.dtype), sin_freq.to(self.dtype)
+        result = cos_freq.to(self.dtype), sin_freq.to(self.dtype)
+        self._freqs_cis_cache = result
+        self._freqs_cis_cache_key = cache_key
+        return result
 
     def load_state_dict(
         self,
