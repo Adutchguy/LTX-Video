@@ -550,6 +550,12 @@ class Attention(nn.Module):
             self._modules.pop("processor")
 
         self.processor = processor
+        # Cache the processor's accepted parameter names so that Attention.forward
+        # does not need to call inspect.signature (a slow reflection operation)
+        # on every single forward pass through every attention layer.
+        self._cached_processor_params: set = set(
+            inspect.signature(processor.__call__).parameters.keys()
+        )
 
     def get_processor(
         self, return_deprecated_lora: bool = False
@@ -691,9 +697,9 @@ class Attention(nn.Module):
         # here we simply pass along all tensors to the selected processor class
         # For standard processors that are defined here, `**cross_attention_kwargs` is empty
 
-        attn_parameters = set(
-            inspect.signature(self.processor.__call__).parameters.keys()
-        )
+        # Use the cached parameter set instead of re-inspecting the signature on
+        # every forward call (inspect.signature is expensive in tight inner loops).
+        attn_parameters = self._cached_processor_params
         unused_kwargs = [
             k for k, _ in cross_attention_kwargs.items() if k not in attn_parameters
         ]

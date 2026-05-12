@@ -197,6 +197,11 @@ class RectifiedFlowScheduler(SchedulerMixin, ConfigMixin, TimestepShifter):
             num_train_timesteps, shift=shift
         )
         self.shift = shift
+        # Pre-compute the zero-padded timestep tensor used in step() so we
+        # avoid allocating a new tensor via torch.cat on every denoising step.
+        self._timesteps_padded = torch.cat(
+            [self.timesteps, torch.zeros(1, device=self.timesteps.device)]
+        )
 
     def get_initial_timesteps(
         self, num_timesteps: int, shift: Optional[float] = None
@@ -259,6 +264,10 @@ class RectifiedFlowScheduler(SchedulerMixin, ConfigMixin, TimestepShifter):
         self.timesteps = timesteps
         self.num_inference_steps = num_inference_steps
         self.sigmas = self.timesteps
+        # Keep padded version in sync with updated timesteps.
+        self._timesteps_padded = torch.cat(
+            [self.timesteps, torch.zeros(1, device=self.timesteps.device)]
+        )
 
     @staticmethod
     def from_pretrained(pretrained_model_path: Union[str, os.PathLike]):
@@ -341,9 +350,8 @@ class RectifiedFlowScheduler(SchedulerMixin, ConfigMixin, TimestepShifter):
             )
         t_eps = 1e-6  # Small epsilon to avoid numerical issues in timestep values
 
-        timesteps_padded = torch.cat(
-            [self.timesteps, torch.zeros(1, device=self.timesteps.device)]
-        )
+        # Use the pre-computed padded tensor rather than allocating a new one each step.
+        timesteps_padded = self._timesteps_padded
 
         # Find the next lower timestep(s) and compute the dt from the current timestep(s)
         if timestep.ndim == 0:
